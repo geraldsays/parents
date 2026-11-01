@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Class 5A — Parent View</title>
 
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js" crossorigin="anonymous"></script>
 
 <style>
 :root{--bg:#0f1117;--surface:#181c27;--surface2:#1e2335;--border:#2a3050;--accent:#00c896;--accent2:#0099ff;--warn:#ffb300;--danger:#ff4757;--text:#e8eaf0;--text2:#8892b0;--text3:#4a5568;--mono:"Courier New",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;}
@@ -54,6 +54,11 @@ tr:last-child td{border-bottom:none;}
 .bpos{background:rgba(0,200,150,.15);color:var(--accent);}
 .bcon{background:rgba(255,71,87,.13);color:var(--danger);}
 .bgen{background:rgba(0,153,255,.13);color:var(--accent2);}
+.b-assigned{background:var(--surface2);color:var(--text3);}
+.b-submitted{background:rgba(0,153,255,.13);color:var(--accent2);}
+.b-graded{background:rgba(255,179,0,.13);color:var(--warn);}
+.b-returned{background:rgba(0,200,150,.15);color:var(--accent);}
+.b-new{background:var(--accent);color:#000;}
 
 .note-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:10px;}
 .note-line{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:13px;}
@@ -85,10 +90,11 @@ tr:last-child td{border-bottom:none;}
   <header>
     <div>
       <div class="hname" id="studentNameHeader">—</div>
-      <div class="hsub">Class 5A</div>
+      <div class="hsub" id="className">Class 5A</div>
     </div>
     <div class="hright">
       <button class="tbtn" id="themeToggle">☀️ Light</button>
+      <button class="tbtn" onclick="printReport()">Print</button>
       <button class="lbtn" id="switchBtn">Switch child</button>
     </div>
   </header>
@@ -126,6 +132,106 @@ tr:last-child td{border-bottom:none;}
 
   const THEME_KEY = "classroom_5a_theme";
   let student = null;
+  let announcements = [];
+  let sessionLastSeen = null, assignmentMeta = {}, classScale = null;
+  let resourcesList = [], unsubscribeResources = null;
+  let className = "Class 5A";
+  function printReport() {
+    if (!student) return;
+    const vals = Object.keys(student.attendance).map((d) => student.attendance[d]).filter((v) => v !== "excused");
+    const rate = vals.length ? Math.round(vals.filter((v) => v === "present" || v === "late").length / vals.length * 100) + "%" : "—";
+    const rows = student.grades.map((g) => `<tr><td>${escapeHtml(g.assignment)}</td><td>${g.score === null || g.score === undefined ? "—" : g.score + " / " + pInfo(g.assignment).max}</td><td>${statusLabel(g.status)}</td></tr>`).join("");
+    const notes = student.notes.map((n) => `<li>${n.date} — ${escapeHtml(n.text)}</li>`).join("");
+    if (!document.getElementById("printStyle")) {
+      const st = document.createElement("style");
+      st.id = "printStyle";
+      st.textContent = "@media screen{#printArea{display:none}} @media print{body{background:#fff!important} body>*:not(#printArea){display:none!important} #printArea{display:block;color:#000;font-family:Arial,sans-serif;padding:24px} #printArea table{width:100%;border-collapse:collapse;margin:8px 0 16px} #printArea th,#printArea td{border:1px solid #999;padding:6px;text-align:left;font-size:13px}}";
+      document.head.appendChild(st);
+    }
+    let area = document.getElementById("printArea");
+    if (!area) { area = document.createElement("div"); area.id = "printArea"; document.body.appendChild(area); }
+    area.innerHTML = `
+      <h2 style="margin:0;">${escapeHtml(className)} — Progress report</h2>
+      <h3 style="margin:8px 0 0;">${escapeHtml(student.name)}</h3>
+      <p><b>Attendance:</b> ${rate}<br><b>Overall average:</b> ${parentAverage()}</p>
+      <h4 style="margin-bottom:0;">Grades</h4>
+      ${rows ? `<table><thead><tr><th>Assignment</th><th>Score</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>` : "<p>No assignments yet.</p>"}
+      <h4 style="margin-bottom:4px;">Teacher notes</h4>
+      ${notes ? `<ul>${notes}</ul>` : "<p>No notes shared.</p>"}`;
+    window.print();
+  }
+  const RES_BTN = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;";
+  function attachResourcesListener() {
+    if (!db) return;
+    if (unsubscribeResources) unsubscribeResources();
+    unsubscribeResources = db.collection("resources").onSnapshot((snap) => {
+      resourcesList = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      if (student) render();
+    }, (err) => console.error("Resources listener error:", err));
+  }
+  function visibleResources() {
+    const cls = student.classId || "default";
+    return resourcesList.filter((r) => (r.classId || "default") === cls && r.teacherOnly !== true);
+  }
+  function openResLink(id) { const r = resourcesList.find((x) => x.id === id); if (r && r.url) window.open(r.url, "_blank", "noopener"); }
+  async function openResFile(id) {
+    const r = resourcesList.find((x) => x.id === id);
+    if (!r || !r.fileId) return;
+    try {
+      const d = await db.collection("resourceFiles").doc(r.fileId).get();
+      if (!d.exists) { alert("File not found."); return; }
+      const dataUrl = d.data().data;
+      const bin = atob(dataUrl.split(",")[1]), mime = dataUrl.slice(5, dataUrl.indexOf(";"));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      a.download = r.fileName || "file";
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (err) { console.error(err); alert("Could not open the file."); }
+  }
+  function resFor(assignment) {
+    return visibleResources().filter((r) => r.assignment === assignment).map((r) =>
+      `<div><a href="#" onclick="${r.url ? "openResLink" : "openResFile"}('${r.id}'); return false;" style="color:var(--accent2); font-size:12px;">📎 ${escapeHtml(r.title)}</a></div>`).join("");
+  }
+  function resourcesSection() {
+    const items = visibleResources().sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    if (!items.length) return "";
+    return '<div class="sectiontitle">Resources</div>' + items.map((r) => `
+      <div class="note-card">
+        <div style="font-weight:600; font-size:14px;">${escapeHtml(r.title)}${newBadge(r.createdAt)}</div>
+        ${r.note ? `<div style="color:var(--text2); font-size:13px; margin:4px 0;">${escapeHtml(r.note)}</div>` : ""}
+        <div class="note-date">${escapeHtml(r.category || "Other")}${r.assignment ? " · for " + escapeHtml(r.assignment) : ""}</div>
+        <div style="margin-top:8px; display:flex; gap:8px;">${r.url ? `<button style="${RES_BTN}" onclick="openResLink('${r.id}')">Open link</button>` : ""}${r.fileId ? `<button style="${RES_BTN}" onclick="openResFile('${r.id}')">Download file</button>` : ""}</div>
+      </div>`).join("");
+  }
+  function newBadge(ts) { return sessionLastSeen && ts && ts > sessionLastSeen ? ' <span class="badge b-new">NEW</span>' : ''; }
+  function pInfo(t) { const m = assignmentMeta[t] || {}; return { max: Number(m.maxScore) > 0 ? Number(m.maxScore) : 100, weight: Number(m.weight) > 0 ? Number(m.weight) : 1 }; }
+  function parentAverage() {
+    let sum = 0, w = 0;
+    student.grades.forEach((g) => { if (g.score === null || g.score === undefined) return; const i = pInfo(g.assignment); sum += (g.score / i.max * 100) * i.weight; w += i.weight; });
+    if (!w) return "—";
+    const a = Math.round(sum / w), sc = classScale || {};
+    const L = a >= (sc.A || 90) ? "A" : a >= (sc.B || 80) ? "B" : a >= (sc.C || 70) ? "C" : a >= (sc.D || 60) ? "D" : "F";
+    return a + "% (" + L + ")";
+  }
+  let unsubscribeAnnouncements = null;
+
+  // Class-wide, not tied to any one child — loads once a parent is
+  // signed into any student's view, and updates live (announcements
+  // is a top-level collection, so a real-time listener works
+  // correctly here, unlike the per-student subcollections).
+  function attachAnnouncementsListener() {
+    if (!db) return;
+    if (unsubscribeAnnouncements) unsubscribeAnnouncements();
+    unsubscribeAnnouncements = db.collection("announcements").orderBy("createdAt", "desc").onSnapshot(
+      (snapshot) => {
+        announcements = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        if (student) render();
+      },
+      (err) => { console.error("Announcements listener error:", err); }
+    );
+  }
 
   function applyTheme(theme) {
     if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
@@ -154,6 +260,10 @@ tr:last-child td{border-bottom:none;}
   }
   function catClass(cat) { return cat === "positive" ? "bpos" : cat === "concern" ? "bcon" : "bgen"; }
   function catLabel(cat) { return cat === "positive" ? "Positive" : cat === "concern" ? "Concern" : "General"; }
+  function statusLabel(status) {
+    const s = status || "assigned";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
 
   function getWeekDates() {
     const d = new Date();
@@ -197,14 +307,27 @@ tr:last-child td{border-bottom:none;}
       const attendance = {};
       attSnap.forEach((d) => { attendance[d.id] = d.data().status; });
       const grades = [];
-      gradesSnap.forEach((d) => { grades.push({ assignment: d.id, score: d.data().score }); });
+      gradesSnap.forEach((d) => { grades.push({ assignment: d.id, score: d.data().score, status: d.data().status || "assigned", updatedAt: d.data().updatedAt }); });
       const notes = [];
       notesSnap.forEach((d) => { notes.push({ id: d.id, ...d.data() }); });
       notes.sort((a, b) => (a.date < b.date ? 1 : -1));
 
-      student = { accessCode: code, ...doc.data(), attendance, grades, notes };
+      student = { accessCode: code, ...doc.data(), attendance, grades, notes: notes.filter((n) => n.shared !== false) };
+      try {
+        const cls = student.classId || "default";
+        const aSnap = await db.collection("assignments").get();
+        assignmentMeta = {};
+        aSnap.forEach((d) => { const v = d.data(); if ((v.classId || "default") === cls) assignmentMeta[v.title || d.id] = v; });
+        const cDoc = await db.collection("classes").doc(cls).get();
+        classScale = cDoc.exists ? (cDoc.data().scale || null) : null;
+        className = cDoc.exists && cDoc.data().name ? cDoc.data().name : "Class 5A";
+      } catch (e) { console.error(e); }
+      sessionLastSeen = localStorage.getItem("parent_seen_" + code);
+      localStorage.setItem("parent_seen_" + code, new Date().toISOString());
       localStorage.setItem("parent_last_code", code);
       showApp();
+      attachAnnouncementsListener();
+      attachResourcesListener();
     } catch (err) {
       console.error(err);
       errorEl.textContent = "Something went wrong looking up that code. Try again.";
@@ -216,6 +339,7 @@ tr:last-child td{border-bottom:none;}
     document.getElementById("appShell").classList.remove("hidden");
     document.getElementById("appShell").style.display = "block";
     document.getElementById("studentNameHeader").textContent = student.name;
+    document.getElementById("className").textContent = className;
     render();
   }
 
@@ -229,6 +353,8 @@ tr:last-child td{border-bottom:none;}
 
   document.getElementById("switchBtn").addEventListener("click", () => {
     student = null;
+    if (unsubscribeAnnouncements) { unsubscribeAnnouncements(); unsubscribeAnnouncements = null; }
+    if (unsubscribeResources) { unsubscribeResources(); unsubscribeResources = null; }
     document.getElementById("appShell").classList.add("hidden");
     document.getElementById("code-screen").classList.remove("hidden");
     document.getElementById("codeInput").value = "";
@@ -253,33 +379,67 @@ tr:last-child td{border-bottom:none;}
     }).join("");
 
     const gradeRows = student.grades.filter((g) => g.score !== null && g.score !== undefined).map((g) => `
-      <tr><td>${escapeHtml(g.assignment)}</td><td><span class="badge bok">${g.score}</span></td></tr>
+      <tr><td>${escapeHtml(g.assignment)}</td><td><span class="badge bok">${g.score}/${pInfo(g.assignment).max}</span>${newBadge(g.updatedAt)}</td><td><span class="badge b-${g.status || 'assigned'}">${statusLabel(g.status)}</span></td></tr>
     `).join("");
     const scores = student.grades.map((g) => g.score).filter((v) => v !== null && v !== undefined);
+
+    // Pending work: any assignment still sitting at "assigned" (not yet
+    // marked submitted/graded/returned by the teacher) — shown separately
+    // since a parent cares about this even before a score exists.
+    const pending = student.grades.filter((g) => (g.status || "assigned") === "assigned");
+    const pendingHtml = pending.map((g) => `
+      <tr><td>${escapeHtml(g.assignment)}${resFor(g.assignment)}</td><td><span class="badge b-assigned">${statusLabel(g.status)}</span></td></tr>
+    `).join("");
 
     const notesHtml = student.notes.map((n) => `
       <div class="note-card">
         <div class="note-line">
-          <span class="note-date">${n.date}</span>
+          <span class="note-date">${n.date}</span>${newBadge(n.createdAt)}
           <span class="badge ${catClass(n.category || 'general')}">${catLabel(n.category || 'general')}</span>
           <span>${escapeHtml(n.text)}</span>
         </div>
       </div>
     `).join("");
 
-    document.getElementById("main").innerHTML = `
+    const announcementsHtml = announcements.filter((a) => (a.classId || "default") === (student.classId || "default")).map((a) => {
+      const when = a.createdAt ? new Date(a.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+      return `
+        <div class="note-card">
+          <div style="font-weight:600; font-size:14px; margin-bottom:4px;">${escapeHtml(a.title || "(untitled)")}${newBadge(a.createdAt)}</div>
+          ${a.body ? `<div style="color:var(--text2); font-size:13px; line-height:1.5; margin-bottom:6px;">${escapeHtml(a.body)}</div>` : ""}
+          <div class="note-date">${when}</div>
+        </div>
+      `;
+    }).join("");
+
+    const cnt = (arr, k) => sessionLastSeen ? arr.filter((x) => x[k] && x[k] > sessionLastSeen).length : 0;
+    const nA = cnt(announcements.filter((a) => (a.classId || "default") === (student.classId || "default")), "createdAt");
+    const nN = cnt(student.notes, "createdAt"), nG = cnt(student.grades, "updatedAt");
+    const parts = [nA ? nA + " announcement" + (nA > 1 ? "s" : "") : "", nN ? nN + " note" + (nN > 1 ? "s" : "") : "", nG ? nG + " grade update" + (nG > 1 ? "s" : "") : ""].filter(Boolean);
+    const summaryHtml = parts.length ? `<div class="banner" style="background:rgba(0,200,150,.12); color:var(--accent); border:1px solid rgba(0,200,150,.3);">Since your last visit: ${parts.join(", ")}</div>` : "";
+    document.getElementById("main").innerHTML = `${summaryHtml}
+      <div class="sectiontitle">Class announcements</div>
+      ${announcementsHtml || `<div class="empty">No announcements yet.</div>`}
+
       <div class="sectiontitle">This week's attendance</div>
       <div class="week-grid">${weekBoxes}</div>
+
+      ${pending.length ? `
+        <div class="sectiontitle">Pending work (${pending.length})</div>
+        <div class="tw">
+          <table><thead><tr><th>Assignment</th><th>Status</th></tr></thead><tbody>${pendingHtml}</tbody></table>
+        </div>
+      ` : ""}
 
       <div class="sectiontitle">Grades</div>
       ${gradeRows ? `
         <div class="tw">
-          <table><thead><tr><th>Assignment</th><th>Score</th></tr></thead><tbody>${gradeRows}</tbody></table>
+          <table><thead><tr><th>Assignment</th><th>Score</th><th>Status</th></tr></thead><tbody>${gradeRows}</tbody></table>
         </div>
-        <div style="text-align:right; margin-top:8px; font-size:12px; color:var(--text2);">Average: <span class="badge bok">${average(scores)}</span></div>
+        <div style="text-align:right; margin-top:8px; font-size:12px; color:var(--text2);">Average: <span class="badge bok">${parentAverage()}</span></div>
       ` : `<div class="empty">No grades recorded yet.</div>`}
 
-      <div class="sectiontitle">Teacher notes</div>
+      ${resourcesSection()}<div class="sectiontitle">Teacher notes</div>
       ${notesHtml || `<div class="empty">No notes yet.</div>`}
     `;
   }
